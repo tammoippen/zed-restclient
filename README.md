@@ -25,8 +25,76 @@ This extension allows you to send HTTP requests directly from your `.http` or `.
 
 ## 🚀 Getting Started
 
-### Installation
-*Instructions on how to install from the Zed Extension Store will be added here once released.*
+### Architecture (read this first)
+
+This extension has **two parts**:
+
+1. **The Zed extension** (`src/lib.rs`) — a small WebAssembly module. It does *not* make any HTTP requests itself. Its only job is to register the `.http`/`.rest` language and to launch the sidecar as a language server.
+2. **The sidecar** (`sidecar/`) — a native Rust LSP binary that does the actual work: parsing your request, sending it with `reqwest`, and showing the response in a new tab.
+
+By default, the published extension downloads a **prebuilt sidecar binary** from the upstream GitHub Releases (`doani/zed-restclient`) the first time it runs. If you want to run *only* code you have built yourself, follow the **"Build everything from source"** path below, which removes that download step.
+
+### Prerequisites
+
+- A recent [Rust toolchain](https://rustup.rs/) (tested with 1.95).
+- The WASM target Zed uses to compile extensions:
+  ```sh
+  rustup target add wasm32-wasip1
+  ```
+- Zed (this guide was verified with the Homebrew `zed-preview` build).
+
+### Build the sidecar from source
+
+From the repository root:
+
+```sh
+cargo build -p sidecar --release
+```
+
+This produces the LSP binary at `target/release/sidecar`. You can sanity-check it:
+
+```sh
+cargo test -p sidecar   # runs the parser / http-client unit tests
+```
+
+### Install in Zed
+
+Zed compiles the WASM extension for you when you install it as a **dev extension** — there is no CLI flag for this, so use the command palette:
+
+1. Open Zed.
+2. Open the command palette (`Cmd-Shift-P`) and run **`zed: install dev extension`**.
+3. Select this repository's root folder (`zed-restclient/`).
+
+Zed will build `src/lib.rs` to WASM and load the extension. Open any `.http` or `.rest` file and you should get syntax highlighting plus a **▶ Send Request** Code Lens.
+
+> **Important:** Zed has Code Lens rendering **disabled by default**, so the **▶ Send Request** button will not appear until you enable it. Add the following to your Zed `settings.json`:
+> ```json
+> "code_lens": "on"
+> ```
+> (or run **`editor: toggle code lens`** from the command palette). Without this, the extension loads and the LSP shows green, but no run button is shown.
+
+> On first use the extension downloads the matching prebuilt sidecar binary from GitHub Releases into Zed's extension work directory. If you prefer to run your own build, do the next step instead.
+
+### (Recommended for full trust) Run your own locally-built sidecar
+
+To avoid the runtime download entirely and run only the sidecar **you** compiled, point the extension at your local binary before installing it. Edit `language_server_command` in `src/lib.rs` so it launches your build instead of downloading one:
+
+```rust
+fn language_server_command(
+    &mut self,
+    _language_server_id: &zed::LanguageServerId,
+    _worktree: &zed::Worktree,
+) -> Result<zed::Command> {
+    Ok(zed::Command {
+        // Absolute path to the binary produced by `cargo build -p sidecar --release`
+        command: "/ABSOLUTE/PATH/TO/zed-restclient/target/release/sidecar".to_string(),
+        args: vec![],
+        env: vec![],
+    })
+}
+```
+
+Then run **`zed: install dev extension`** (or **`zed: rebuild dev extension`** if it is already installed). Now no binaries are fetched from the network — the only HTTP traffic is the requests you trigger yourself.
 
 ### Usage
 Create a file ending in `.http` or `.rest` and write your request.
