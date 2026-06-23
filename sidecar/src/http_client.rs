@@ -282,7 +282,7 @@ mod tests {
         let http_req = HttpRequest {
             method: "GET",
             url: "https://httpbin.org/basic-auth/user/passwd",
-            // Colon-separated credentials (the form many users write).
+            // Colon-separated credentials
             headers: vec![("Authorization", "Basic user:passwd")],
             body: None,
         };
