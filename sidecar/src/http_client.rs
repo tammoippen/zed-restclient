@@ -85,6 +85,20 @@ fn resolve_system_variables(text: &str) -> String {
     resolved
 }
 
+/// Removes whole-line comments from a request body. A line whose first
+/// non-whitespace characters are `#` or `//` is dropped; all other lines are
+/// kept verbatim. This lets users annotate request blocks (including trailing
+/// comments before the next `###` separator) without those lines being sent.
+fn strip_body_comments(body: &str) -> String {
+    body.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(trimmed.starts_with('#') || trimmed.starts_with("//"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn resolve_variables(text: &str, variables: &HashMap<&str, &str>) -> String {
     let mut resolved = text.to_string();
 
@@ -122,8 +136,12 @@ pub fn build_request(
     }
 
     if let Some(body_text) = req.body {
-        let resolved_body = resolve_variables(body_text, variables);
-        request_builder = request_builder.body(resolved_body);
+        let stripped = strip_body_comments(body_text);
+        let resolved_body = resolve_variables(&stripped, variables);
+        // A body consisting only of comments/whitespace is treated as no body.
+        if !resolved_body.trim().is_empty() {
+            request_builder = request_builder.body(resolved_body);
+        }
     }
 
     let request = request_builder
@@ -263,5 +281,46 @@ mod tests {
             .unwrap();
         // "admin:secret" in base64 is "YWRtaW46c2VjcmV0"
         assert_eq!(auth_header, "Basic YWRtaW46c2VjcmV0");
+    }
+
+    #[test]
+    fn test_strip_body_comments() {
+        let body = "{\n  \"a\": 1\n  # a comment\n  // another\n}\n# trailing";
+        let stripped = strip_body_comments(body);
+        assert_eq!(stripped, "{\n  \"a\": 1\n}");
+    }
+
+    #[test]
+    fn test_build_request_strips_body_comments() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "POST",
+            url: "https://api.example.com/values",
+            headers: vec![("Content-Type", "application/json")],
+            body: Some("# leading comment\n{\"a\":1}\n# trailing comment"),
+        };
+
+        let reqwest_req =
+            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+
+        let body_bytes = reqwest_req.body().unwrap().as_bytes().unwrap();
+        assert_eq!(body_bytes, b"{\"a\":1}");
+    }
+
+    #[test]
+    fn test_build_request_comment_only_body_sends_no_body() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "GET",
+            url: "https://api.example.com/values",
+            headers: vec![("Authorization", "Bearer token")],
+            // Matches the reported case: a stray comment captured as the body.
+            body: Some("# some comment here"),
+        };
+
+        let reqwest_req =
+            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+
+        assert!(reqwest_req.body().is_none());
     }
 }
