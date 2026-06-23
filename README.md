@@ -114,6 +114,33 @@ Accept: application/json
 
 Then click the **▶ Send Request** button (Code Lens) that appears directly above the `GET` line.
 
+#### Variables
+
+- **File variables** — define with `@name = value` and use as `{{name}}`.
+- **System variables** — `{{$guid}}`, `{{$datetime}}` (also `{{$datetime rfc1123}}` / `{{$datetime iso8601}}`), and `{{$randomInt min max}}`.
+- **Environment variables**:
+  - `{{$dotenv NAME}}` reads `NAME` from the nearest `.env` file, searched from the request file's directory upwards. The closest `.env` wins.
+  - `{{$processEnv NAME}}` reads `NAME` from the process environment of the running editor.
+
+These compose with file variables, so a common pattern is:
+
+```http
+@token = {{$dotenv ACCESS_TOKEN}}
+@user  = {{$processEnv USER}}
+
+### Get current user
+
+GET https://api.example.com/me
+Authorization: Bearer {{token}}
+X-User: {{user}}
+```
+
+A matching `.env` next to the file:
+
+```dotenv
+ACCESS_TOKEN=eyJhbGciOi...
+```
+
 ## 🤝 Contributing
 
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.

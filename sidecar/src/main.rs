@@ -164,9 +164,19 @@ impl Backend {
             )
             .await;
 
+        // Directory of the request file, used to locate a `.env` for {{$dotenv}}.
+        let base_dir = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
         let http_client = reqwest::Client::new();
-        let reqwest_req = match http_client::build_request(&http_client, req, &http_file.variables)
-        {
+        let reqwest_req = match http_client::build_request(
+            &http_client,
+            req,
+            &http_file.variables,
+            base_dir.as_deref(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = format!("Failed to build request: {}", e);
