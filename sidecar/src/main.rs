@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -8,15 +9,46 @@ mod codelens;
 mod http_client;
 mod parser;
 
+/// Default for whether the resolved request is shown above the response.
+const DEFAULT_SHOW_REQUEST: bool = false;
+
 #[derive(Debug)]
 struct Backend {
     client: Client,
     document_map: RwLock<HashMap<Url, String>>,
+    /// Whether to include the resolved request above the response output.
+    show_request: AtomicBool,
+}
+
+/// Resolves the `showRequest` setting. Precedence:
+/// 1. LSP `initializationOptions.showRequest` (e.g. Zed `lsp` settings),
+/// 2. the `ZED_RESTCLIENT_SHOW_REQUEST` environment variable,
+/// 3. the built-in default.
+fn resolve_show_request(init_options: Option<&serde_json::Value>) -> bool {
+    if let Some(b) = init_options
+        .and_then(|opts| opts.get("showRequest"))
+        .and_then(|v| v.as_bool())
+    {
+        return b;
+    }
+
+    if let Ok(raw) = std::env::var("ZED_RESTCLIENT_SHOW_REQUEST") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+
+    DEFAULT_SHOW_REQUEST
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let show_request = resolve_show_request(params.initialization_options.as_ref());
+        self.show_request.store(show_request, Ordering::Relaxed);
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 code_lens_provider: Some(CodeLensOptions {
@@ -185,6 +217,9 @@ impl Backend {
             }
         };
 
+        // Capture the resolved request now, before `execute` consumes it.
+        let request_preview = http_client::render_request(&reqwest_req);
+
         let response = match http_client.execute(reqwest_req).await {
             Ok(res) => res,
             Err(e) => {
@@ -198,7 +233,15 @@ impl Backend {
         let headers = response.headers().clone();
         let body = response.text().await.unwrap_or_default();
 
-        let mut response_text = format!("HTTP/1.1 {}\n", status);
+        let mut response_text = String::new();
+
+        // Optionally prepend the resolved request (headers shown verbatim).
+        if self.show_request.load(Ordering::Relaxed) {
+            response_text.push_str(&request_preview);
+            response_text.push_str("\n###  Response  ###\n\n");
+        }
+
+        response_text.push_str(&format!("HTTP/1.1 {}\n", status));
         for (name, value) in headers.iter() {
             let v = value.to_str().unwrap_or("[invalid header value]");
             response_text.push_str(&format!("{}: {}\n", name, v));
@@ -281,6 +324,32 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         document_map: RwLock::new(HashMap::new()),
+        show_request: AtomicBool::new(DEFAULT_SHOW_REQUEST),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_resolve_show_request_from_init_options() {
+        let opts = json!({ "showRequest": false });
+        assert!(!resolve_show_request(Some(&opts)));
+
+        let opts = json!({ "showRequest": true });
+        assert!(resolve_show_request(Some(&opts)));
+    }
+
+    #[test]
+    fn test_resolve_show_request_default() {
+        // No options and (assuming) no env var set => default.
+        assert_eq!(resolve_show_request(None), DEFAULT_SHOW_REQUEST);
+
+        // Unrelated options also fall back to default.
+        let opts = json!({ "somethingElse": 1 });
+        assert_eq!(resolve_show_request(Some(&opts)), DEFAULT_SHOW_REQUEST);
+    }
 }

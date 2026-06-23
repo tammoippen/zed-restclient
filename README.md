@@ -141,6 +141,38 @@ A matching `.env` next to the file:
 ACCESS_TOKEN=eyJhbGciOi...
 ```
 
+### Response output
+
+The response opens in a scratch buffer. By default it contains only the response. You can optionally show the **resolved request** above it so you can see exactly what was sent:
+
+```http
+GET https://api.example.com/me
+authorization: Bearer abc123
+
+###  Response  ###
+
+HTTP/1.1 200 OK
+content-type: application/json
+
+{ "id": 1 }
+```
+
+Enable it (`showRequest`, default `false`) in either of two ways:
+
+- **Zed settings** (`settings.json`) via the language server's initialization options:
+  ```json
+  "lsp": {
+    "rest-client": {
+      "initialization_options": {
+        "showRequest": true
+      }
+    }
+  }
+  ```
+- **Environment variable** (handy when running a locally-built sidecar): set `ZED_RESTCLIENT_SHOW_REQUEST` to `true`/`1`/`on` (or `false`/`0`/`off`). The `settings.json` value takes precedence over the environment variable.
+
+> ⚠️ When enabled, the request block is rendered **verbatim**, including `Authorization` and other secret headers in cleartext.
+
 ## 🤝 Contributing
 
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
