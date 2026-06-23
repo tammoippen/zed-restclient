@@ -1,3 +1,4 @@
+use crate::exchange::ExchangeCache;
 use crate::parser::HttpRequest;
 use base64::prelude::*;
 use reqwest::{Client, Method, Request};
@@ -85,16 +86,24 @@ fn resolve_system_variables(text: &str) -> String {
     resolved
 }
 
-fn resolve_variables(text: &str, variables: &HashMap<&str, &str>) -> String {
+fn resolve_variables(
+    text: &str,
+    variables: &HashMap<&str, &str>,
+    request_cache: &ExchangeCache,
+) -> String {
     let mut resolved = text.to_string();
 
-    // 1. Resolve custom user variables from the file
+    // 1. Resolve custom user variables from the file (their values may
+    //    themselves contain request-variable references).
     for (key, value) in variables {
         let placeholder = format!("{{{{{}}}}}", key);
         resolved = resolved.replace(&placeholder, value);
     }
 
-    // 2. Resolve built-in system variables
+    // 2. Resolve request variables ({{name.response.body.$...}}) from the cache.
+    resolved = crate::exchange::resolve_request_variables(&resolved, request_cache);
+
+    // 3. Resolve built-in system variables
     resolve_system_variables(&resolved)
 }
 
@@ -103,16 +112,17 @@ pub fn build_request(
     client: &Client,
     req: &HttpRequest<'_>,
     variables: &HashMap<&str, &str>,
+    request_cache: &ExchangeCache,
 ) -> anyhow::Result<Request> {
     let method = Method::from_str(req.method)
         .map_err(|_| anyhow::anyhow!("Invalid HTTP Method: {}", req.method))?;
 
-    let url = resolve_variables(req.url, variables);
+    let url = resolve_variables(req.url, variables, request_cache);
     let mut request_builder = client.request(method, &url);
 
     for (key, value) in &req.headers {
-        let resolved_key = resolve_variables(key, variables);
-        let mut resolved_value = resolve_variables(value, variables);
+        let resolved_key = resolve_variables(key, variables, request_cache);
+        let mut resolved_value = resolve_variables(value, variables, request_cache);
 
         if resolved_key.to_lowercase() == "authorization" {
             resolved_value = process_auth_header(&resolved_value);
@@ -122,7 +132,7 @@ pub fn build_request(
     }
 
     if let Some(body_text) = req.body {
-        let resolved_body = resolve_variables(body_text, variables);
+        let resolved_body = resolve_variables(body_text, variables, request_cache);
         request_builder = request_builder.body(resolved_body);
     }
 
@@ -149,8 +159,8 @@ mod tests {
             body: Some("{\"hello\":\"world\"}"),
         };
 
-        let reqwest_req =
-            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), &ExchangeCache::new())
+            .expect("Failed to build request");
 
         // Verify Method
         assert_eq!(reqwest_req.method(), Method::POST);
@@ -184,8 +194,8 @@ mod tests {
         vars.insert("userId", "123");
         vars.insert("token", "secret123");
 
-        let reqwest_req =
-            build_request(&client, &http_req, &vars).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &vars, &ExchangeCache::new())
+            .expect("Failed to build request");
 
         assert_eq!(
             reqwest_req.url().as_str(),
@@ -200,18 +210,60 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_with_request_variables() {
+        use crate::exchange::{Exchange, ExchangeMessage};
+
+        let client = Client::new();
+        let http_req = HttpRequest {
+            name: None,
+            method: "GET",
+            url: "https://api.example.com/comments/{{login.response.body.$.id}}",
+            headers: vec![(
+                "Authorization",
+                "Bearer {{login.response.headers.X-AuthToken}}",
+            )],
+            body: None,
+        };
+
+        let mut cache = ExchangeCache::new();
+        cache.insert(
+            "login".to_string(),
+            Exchange {
+                request: ExchangeMessage::default(),
+                response: ExchangeMessage {
+                    headers: vec![("X-AuthToken".to_string(), "tok-99".to_string())],
+                    body: r#"{"id":7}"#.to_string(),
+                },
+            },
+        );
+
+        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), &cache)
+            .expect("Failed to build request");
+
+        assert_eq!(
+            reqwest_req.url().as_str(),
+            "https://api.example.com/comments/7"
+        );
+        assert_eq!(
+            reqwest_req.headers().get("Authorization").unwrap(),
+            "Bearer tok-99"
+        );
+    }
+
+    #[test]
     fn test_system_variables() {
         let vars = HashMap::new();
 
-        let guid_text = resolve_variables("id: {{$guid}}", &vars);
+        let guid_text = resolve_variables("id: {{$guid}}", &vars, &ExchangeCache::new());
         assert!(guid_text.starts_with("id: "));
         assert_eq!(guid_text.len(), 4 + 36); // "id: " + 36 char UUID
 
-        let dt_iso = resolve_variables("time: {{$datetime iso8601}}", &vars);
+        let dt_iso = resolve_variables("time: {{$datetime iso8601}}", &vars, &ExchangeCache::new());
         assert!(dt_iso.contains('T')); // ISO8601 has a 'T'
         assert!(dt_iso.contains('+') || dt_iso.contains('Z'));
 
-        let rand_int = resolve_variables("number: {{$randomInt 10 20}}", &vars);
+        let rand_int =
+            resolve_variables("number: {{$randomInt 10 20}}", &vars, &ExchangeCache::new());
         let num_str = rand_int.strip_prefix("number: ").unwrap();
         let num: i32 = num_str.parse().unwrap();
         assert!((10..=20).contains(&num));
@@ -228,8 +280,8 @@ mod tests {
             body: None,
         };
 
-        let reqwest_req =
-            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), &ExchangeCache::new())
+            .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
@@ -256,8 +308,8 @@ mod tests {
         vars.insert("user", "admin");
         vars.insert("pass", "secret");
 
-        let reqwest_req =
-            build_request(&client, &http_req, &vars).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &vars, &ExchangeCache::new())
+            .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
