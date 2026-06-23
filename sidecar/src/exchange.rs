@@ -84,6 +84,8 @@ pub fn parse_request_var_ref(inner: &str) -> Option<RequestVarRef<'_>> {
 /// - `body` + `*` → the full body verbatim.
 /// - `body` + `$...` → JSONPath; first match. Scalars render without quotes,
 ///   objects/arrays as compact JSON.
+/// - `body` + anything else → XPath 1.0 over an XML body; string value of the
+///   first matching node.
 ///
 /// Returns `None` when the lookup fails (caller falls back to literal text).
 pub fn eval_accessor(part: Part, accessor: &str, msg: &ExchangeMessage) -> Option<String> {
@@ -100,9 +102,39 @@ pub fn eval_accessor(part: Part, accessor: &str, msg: &ExchangeMessage) -> Optio
             if accessor.starts_with('$') {
                 return eval_jsonpath(accessor, &msg.body);
             }
-            // XPath and other accessors land in phase 2.
-            None
+            // Anything else is treated as an XPath expression over an XML body.
+            eval_xpath(accessor, &msg.body)
         }
+    }
+}
+
+/// Evaluate an XPath 1.0 expression against an XML body, returning the string
+/// value of the first matching node (or the string value of a non-node-set
+/// result). Returns `None` when the body is not XML or nothing matches.
+fn eval_xpath(expr: &str, body: &str) -> Option<String> {
+    use sxd_document::parser;
+    use sxd_xpath::{Context, Factory, Value};
+
+    let package = parser::parse(body).ok()?;
+    let document = package.as_document();
+
+    let factory = Factory::new();
+    let xpath = factory.build(expr).ok()??;
+    let context = Context::new();
+
+    match xpath.evaluate(&context, document.root()).ok()? {
+        Value::Nodeset(nodes) => {
+            // XPath document order is not guaranteed by the nodeset; sort by
+            // document order so "first node" is well-defined.
+            let mut docs = nodes.document_order();
+            if docs.is_empty() {
+                return None;
+            }
+            Some(docs.remove(0).string_value())
+        }
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Boolean(b) => Some(b.to_string()),
     }
 }
 
@@ -247,6 +279,51 @@ mod tests {
     fn jsonpath_on_invalid_json_returns_none() {
         let m = msg(&[], "not json");
         assert_eq!(eval_accessor(Part::Body, "$.token", &m), None);
+    }
+
+    #[test]
+    fn xpath_returns_first_node_string_value() {
+        let m = msg(
+            &[],
+            "<feed><title>Hello</title><entry>a</entry><entry>b</entry></feed>",
+        );
+        assert_eq!(
+            eval_accessor(Part::Body, "/feed/title", &m),
+            Some("Hello".to_string())
+        );
+    }
+
+    #[test]
+    fn xpath_first_of_many_matches() {
+        let m = msg(
+            &[],
+            "<feed><entry>first</entry><entry>second</entry></feed>",
+        );
+        assert_eq!(
+            eval_accessor(Part::Body, "/feed/entry", &m),
+            Some("first".to_string())
+        );
+    }
+
+    #[test]
+    fn xpath_attribute_value() {
+        let m = msg(&[], r#"<root><item id="42">x</item></root>"#);
+        assert_eq!(
+            eval_accessor(Part::Body, "/root/item/@id", &m),
+            Some("42".to_string())
+        );
+    }
+
+    #[test]
+    fn xpath_missing_node_returns_none() {
+        let m = msg(&[], "<feed><title>Hello</title></feed>");
+        assert_eq!(eval_accessor(Part::Body, "/feed/missing", &m), None);
+    }
+
+    #[test]
+    fn xpath_on_invalid_xml_returns_none() {
+        let m = msg(&[], "not xml <<<");
+        assert_eq!(eval_accessor(Part::Body, "/feed/title", &m), None);
     }
 
     fn sample_cache() -> ExchangeCache {
