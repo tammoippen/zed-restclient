@@ -1,6 +1,6 @@
 # Plan: Request Variables (named requests & response chaining)
 
-Status: **Design / not yet implemented**
+Status: **Phase 1 implemented** (naming + cache + headers + full body + JSONPath)
 Branch: `feat/request-variables`
 Tracking the vscode-restclient ["Request Variables"](https://github.com/Huachao/vscode-restclient#request-variables) feature.
 
@@ -192,15 +192,16 @@ similar diagnostics and hovers. Hover support is optional and out of scope for v
 
 ## 5. Phased implementation
 
-1. **Phase 1 — naming + cache + headers + full body + JSONPath** (covers the
-   motivating examples):
-   - Parser: capture `# @name`.
-   - `Backend` response cache + populate on send (reuse `render_request` to
-     capture the request message).
-   - Reference parser + evaluator for `headers`, `body.*`, `body.$json`.
-   - Wire into resolution pipeline; literal fallback when not cached.
-   - Add `serde_json_path`.
-   - Tests (see §6).
+1. **Phase 1 — naming + cache + headers + full body + JSONPath** ✅ **done**
+   (covers the motivating examples):
+   - Parser: capture `# @name`. ✅
+   - `Backend` response cache + populate on send (`capture_request_message`
+     records the resolved request). ✅
+   - Reference parser + evaluator for `headers`, `body.*`, `body.$json`
+     (`sidecar/src/exchange.rs`). ✅
+   - Wire into resolution pipeline; literal fallback when not cached. ✅
+   - Add `serde_json_path`. ✅
+   - Tests (see §6). ✅
 2. **Phase 2 — XPath/XML** body accessors via `sxd-*`.
 3. **Phase 3 — diagnostics/hover** for unresolved/typed references.
 
