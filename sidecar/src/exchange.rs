@@ -199,6 +199,70 @@ fn resolve_one(inner: &str, cache: &ExchangeCache) -> Option<String> {
     eval_accessor(reference.part, reference.accessor, msg)
 }
 
+/// A request-variable reference that could not be resolved against the cache,
+/// located by byte offsets into the source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRef {
+    /// Byte offset of the opening `{{`.
+    pub start: usize,
+    /// Byte offset just past the closing `}}`.
+    pub end: usize,
+    pub message: String,
+}
+
+/// Scan `text` for request-variable references and report the ones that cannot
+/// be resolved against `cache`. Non-reference placeholders (`{{baseUrl}}`,
+/// `{{$guid}}`, ...) are ignored, since they are handled elsewhere.
+pub fn collect_unresolved_refs(text: &str, cache: &ExchangeCache) -> Vec<UnresolvedRef> {
+    let mut unresolved = Vec::new();
+    let mut search_from = 0;
+
+    while let Some(rel_open) = text[search_from..].find("{{") {
+        let open = search_from + rel_open;
+        let after_open = open + 2;
+        let Some(rel_close) = text[after_open..].find("}}") else {
+            break;
+        };
+        let close = after_open + rel_close;
+        let end = close + 2;
+        let inner = &text[after_open..close];
+        search_from = end;
+
+        let Some(reference) = parse_request_var_ref(inner) else {
+            continue;
+        };
+
+        match cache.get(reference.name) {
+            None => unresolved.push(UnresolvedRef {
+                start: open,
+                end,
+                message: format!(
+                    "Request variable: named request `{}` has not been sent yet.",
+                    reference.name
+                ),
+            }),
+            Some(exchange) => {
+                let msg = match reference.message {
+                    Message::Request => &exchange.request,
+                    Message::Response => &exchange.response,
+                };
+                if eval_accessor(reference.part, reference.accessor, msg).is_none() {
+                    unresolved.push(UnresolvedRef {
+                        start: open,
+                        end,
+                        message: format!(
+                            "Request variable: could not resolve `{}` from `{}`.",
+                            reference.accessor, reference.name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    unresolved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +461,53 @@ mod tests {
         let cache = sample_cache();
         let input = "{{login.response.headers.X-AuthToken}}-{{login.response.body.$.data.token}}";
         assert_eq!(resolve_request_variables(input, &cache), "tok-42-abc123");
+    }
+
+    #[test]
+    fn unresolved_flags_unsent_request() {
+        let cache = ExchangeCache::new();
+        let text = "GET https://x/{{login.response.body.$.id}}\n";
+        let found = collect_unresolved_refs(text, &cache);
+        assert_eq!(found.len(), 1);
+        let start = text.find("{{").unwrap();
+        assert_eq!(found[0].start, start);
+        assert_eq!(found[0].end, text.find("}}").unwrap() + 2);
+        assert!(found[0].message.contains("login"));
+        assert!(found[0].message.contains("has not been sent"));
+    }
+
+    #[test]
+    fn unresolved_flags_missing_accessor() {
+        let cache = sample_cache();
+        let text = "{{login.response.body.$.nope}}";
+        let found = collect_unresolved_refs(text, &cache);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].message.contains("could not resolve"));
+        assert!(found[0].message.contains("$.nope"));
+    }
+
+    #[test]
+    fn resolved_reference_is_not_flagged() {
+        let cache = sample_cache();
+        let text = "{{login.response.headers.X-AuthToken}}";
+        assert!(collect_unresolved_refs(text, &cache).is_empty());
+    }
+
+    #[test]
+    fn plain_and_system_vars_not_flagged() {
+        let cache = ExchangeCache::new();
+        let text = "{{baseUrl}}/x {{$guid}} {{login}}";
+        assert!(collect_unresolved_refs(text, &cache).is_empty());
+    }
+
+    #[test]
+    fn collects_multiple_unresolved() {
+        let cache = ExchangeCache::new();
+        let text = "{{a.response.body.*}} and {{b.request.headers.X}}";
+        let found = collect_unresolved_refs(text, &cache);
+        assert_eq!(found.len(), 2);
+        assert!(found[0].message.contains('a'));
+        assert!(found[1].message.contains('b'));
     }
 
     #[test]
