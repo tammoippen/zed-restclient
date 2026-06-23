@@ -142,6 +142,7 @@ mod tests {
     fn test_build_request() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "POST",
             url: "https://httpbin.org/post",
             headers: vec![("Content-Type", "application/json"), ("X-Custom", "Test")],
@@ -171,6 +172,7 @@ mod tests {
     fn test_build_request_with_variables() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "{{baseUrl}}/api/{{userId}}",
             headers: vec![("Authorization", "Bearer {{token}}")],
@@ -219,6 +221,7 @@ mod tests {
     fn test_basic_auth_encoding() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://httpbin.org/basic-auth/user/passwd",
             headers: vec![("Authorization", "Basic user passwd")],
@@ -242,6 +245,7 @@ mod tests {
     fn test_basic_auth_with_variables() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://httpbin.org/basic-auth/admin/secret",
             headers: vec![("Authorization", "Basic {{user}} {{pass}}")],
