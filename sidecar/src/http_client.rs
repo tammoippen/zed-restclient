@@ -133,6 +133,29 @@ pub fn build_request(
     Ok(request)
 }
 
+/// Renders a built request back into raw HTTP text (request line, headers, and
+/// body) for display alongside the response. Header values — including
+/// `Authorization` — are shown verbatim.
+pub fn render_request(req: &Request) -> String {
+    let mut out = format!("{} {}\n", req.method(), req.url());
+
+    for (name, value) in req.headers() {
+        let v = value.to_str().unwrap_or("[invalid header value]");
+        out.push_str(&format!("{}: {}\n", name, v));
+    }
+
+    if let Some(body) = req.body()
+        && let Some(bytes) = body.as_bytes()
+        && !bytes.is_empty()
+    {
+        out.push('\n');
+        out.push_str(&String::from_utf8_lossy(bytes));
+        out.push('\n');
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +286,50 @@ mod tests {
             .unwrap();
         // "admin:secret" in base64 is "YWRtaW46c2VjcmV0"
         assert_eq!(auth_header, "Basic YWRtaW46c2VjcmV0");
+    }
+
+    #[test]
+    fn test_render_request() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "POST",
+            url: "https://api.example.com/users",
+            headers: vec![
+                ("Content-Type", "application/json"),
+                ("Authorization", "Bearer secret-token"),
+            ],
+            body: Some("{\"name\":\"John\"}"),
+        };
+
+        let reqwest_req =
+            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+
+        let rendered = render_request(&reqwest_req);
+
+        assert!(rendered.starts_with("POST https://api.example.com/users\n"));
+        assert!(rendered.contains("content-type: application/json\n"));
+        // Authorization is shown verbatim (cleartext).
+        assert!(rendered.contains("authorization: Bearer secret-token\n"));
+        assert!(rendered.ends_with("{\"name\":\"John\"}\n"));
+    }
+
+    #[test]
+    fn test_render_request_no_body() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "GET",
+            url: "https://api.example.com/ping",
+            headers: vec![("Accept", "application/json")],
+            body: None,
+        };
+
+        let reqwest_req =
+            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+
+        let rendered = render_request(&reqwest_req);
+        assert!(rendered.starts_with("GET https://api.example.com/ping\n"));
+        assert!(rendered.contains("accept: application/json\n"));
+        // No blank-line-separated body section when there is no body.
+        assert!(!rendered.contains("\n\n"));
     }
 }
