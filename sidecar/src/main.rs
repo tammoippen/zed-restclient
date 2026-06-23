@@ -72,12 +72,18 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, format!("Opened file: {}", uri))
             .await;
+
+        self.publish_request_var_diagnostics(uri).await;
     }
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.pop() {
-            self.document_map.write().await.insert(uri, change.text);
+            self.document_map
+                .write()
+                .await
+                .insert(uri.clone(), change.text);
+            self.publish_request_var_diagnostics(uri).await;
         }
     }
 
@@ -133,6 +139,24 @@ impl LanguageServer for Backend {
     }
 }
 
+/// Convert a byte offset into an LSP `Position` (line + UTF-16 character).
+fn offset_to_position(text: &str, offset: usize) -> Position {
+    let offset = offset.min(text.len());
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            line_start = idx + ch.len_utf8();
+        }
+    }
+    let character = text[line_start..offset].encode_utf16().count() as u32;
+    Position { line, character }
+}
+
 /// Capture the headers and body of a built reqwest request as an
 /// ExchangeMessage, so `{{name.request....}}` references resolve to exactly
 /// what was sent (after variable substitution).
@@ -151,6 +175,40 @@ fn capture_request_message(req: &reqwest::Request) -> exchange::ExchangeMessage 
 }
 
 impl Backend {
+    /// Recompute and publish diagnostics for unresolved request-variable
+    /// references in the given document.
+    async fn publish_request_var_diagnostics(&self, uri: Url) {
+        let text = match self.document_map.read().await.get(&uri) {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        let cache = self
+            .response_cache
+            .read()
+            .await
+            .get(&uri)
+            .cloned()
+            .unwrap_or_default();
+
+        let diagnostics = exchange::collect_unresolved_refs(&text, &cache)
+            .into_iter()
+            .map(|r| Diagnostic {
+                range: Range {
+                    start: offset_to_position(&text, r.start),
+                    end: offset_to_position(&text, r.end),
+                },
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some("zed-restclient".to_string()),
+                message: r.message,
+                ..Default::default()
+            })
+            .collect();
+
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
+    }
+
     async fn handle_send_request(&self, args: Vec<serde_json::Value>) -> anyhow::Result<()> {
         if args.len() < 2 {
             anyhow::bail!("Invalid arguments for send_request. Expected URI and block index.");
@@ -243,14 +301,19 @@ impl Backend {
                     .collect(),
                 body: body.clone(),
             };
-            let mut cache = self.response_cache.write().await;
-            cache.entry(uri.clone()).or_default().insert(
-                name,
-                exchange::Exchange {
-                    request: request_message,
-                    response: response_message,
-                },
-            );
+            {
+                let mut cache = self.response_cache.write().await;
+                cache.entry(uri.clone()).or_default().insert(
+                    name,
+                    exchange::Exchange {
+                        request: request_message,
+                        response: response_message,
+                    },
+                );
+            }
+            // The cache changed, so references that were unresolved may now
+            // resolve (and vice versa) — refresh diagnostics.
+            self.publish_request_var_diagnostics(uri.clone()).await;
         }
 
         self.client
@@ -331,4 +394,44 @@ async fn main() {
         response_cache: RwLock::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_to_position_first_line() {
+        let text = "GET {{x}}";
+        let pos = offset_to_position(text, 4);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 4);
+    }
+
+    #[test]
+    fn offset_to_position_later_line() {
+        let text = "line0\nline1\nGET {{x}}";
+        let offset = text.find("{{").unwrap();
+        let pos = offset_to_position(text, offset);
+        assert_eq!(pos.line, 2);
+        assert_eq!(pos.character, 4);
+    }
+
+    #[test]
+    fn offset_to_position_counts_utf16_units() {
+        // 'é' is one char but lives before the offset on the same line.
+        let text = "é{{x}}";
+        let offset = text.find("{{").unwrap();
+        let pos = offset_to_position(text, offset);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 1); // one UTF-16 unit for 'é'
+    }
+
+    #[test]
+    fn offset_to_position_clamps_past_end() {
+        let text = "abc";
+        let pos = offset_to_position(text, 999);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 3);
+    }
 }
