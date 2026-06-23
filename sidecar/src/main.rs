@@ -231,7 +231,13 @@ impl Backend {
 
         let status = response.status();
         let headers = response.headers().clone();
-        let body = response.text().await.unwrap_or_default();
+        let raw_body = response.text().await.unwrap_or_default();
+
+        // Pretty-print JSON responses with a 2-space indent.
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        let body = http_client::format_response_body(content_type, &raw_body);
 
         let mut response_text = String::new();
 

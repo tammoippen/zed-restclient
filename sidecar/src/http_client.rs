@@ -258,6 +258,30 @@ pub fn render_request(req: &Request) -> String {
     out
 }
 
+/// Returns true if the `Content-Type` header denotes a JSON payload, including
+/// structured-suffix types such as `application/problem+json`.
+fn is_json_content_type(content_type: Option<&str>) -> bool {
+    content_type
+        .map(|ct| {
+            let ct = ct.to_ascii_lowercase();
+            ct.contains("application/json") || ct.contains("+json")
+        })
+        .unwrap_or(false)
+}
+
+/// Pretty-prints a JSON response body with a 2-space indent. If the response is
+/// not JSON (per `content_type`) or the body fails to parse, it is returned
+/// unchanged.
+pub fn format_response_body(content_type: Option<&str>, body: &str) -> String {
+    if is_json_content_type(content_type)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Ok(pretty) = serde_json::to_string_pretty(&value)
+    {
+        return pretty;
+    }
+    body.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +624,43 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(auth_header, "Basic YWRtaW46c2VjcmV0");
+    }
+
+    #[test]
+    fn test_format_response_body_json() {
+        let body = r#"{"name":"John","nested":{"a":1},"list":[1,2]}"#;
+        let pretty = format_response_body(Some("application/json"), body);
+        // Original key order is preserved (serde_json "preserve_order" feature).
+        let expected = "{\n  \"name\": \"John\",\n  \"nested\": {\n    \"a\": 1\n  },\n  \"list\": [\n    1,\n    2\n  ]\n}";
+        assert_eq!(pretty, expected);
+    }
+
+    #[test]
+    fn test_format_response_body_json_with_charset() {
+        let body = r#"{"ok":true}"#;
+        let pretty = format_response_body(Some("application/json; charset=utf-8"), body);
+        assert_eq!(pretty, "{\n  \"ok\": true\n}");
+    }
+
+    #[test]
+    fn test_format_response_body_structured_suffix() {
+        let body = r#"{"type":"about:blank"}"#;
+        let pretty = format_response_body(Some("application/problem+json"), body);
+        assert_eq!(pretty, "{\n  \"type\": \"about:blank\"\n}");
+    }
+
+    #[test]
+    fn test_format_response_body_non_json_unchanged() {
+        let body = "<html><body>hi</body></html>";
+        assert_eq!(format_response_body(Some("text/html"), body), body);
+        // No content type => unchanged.
+        assert_eq!(format_response_body(None, body), body);
+    }
+
+    #[test]
+    fn test_format_response_body_invalid_json_unchanged() {
+        // Declared JSON but not parseable: keep the raw body rather than erroring.
+        let body = "{not valid json";
+        assert_eq!(format_response_body(Some("application/json"), body), body);
     }
 }
