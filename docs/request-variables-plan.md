@@ -1,6 +1,6 @@
 # Plan: Request Variables (named requests & response chaining)
 
-Status: **Phases 1 & 2 implemented** (naming + cache + headers + full body + JSONPath + XPath)
+Status: **Phases 1, 2 & 3 implemented** (naming + cache + headers + full body + JSONPath + XPath + diagnostics)
 Branch: `feat/request-variables`
 Tracking the vscode-restclient ["Request Variables"](https://github.com/Huachao/vscode-restclient#request-variables) feature.
 
@@ -205,7 +205,10 @@ similar diagnostics and hovers. Hover support is optional and out of scope for v
 2. **Phase 2 — XPath/XML** body accessors via `sxd-*`. ✅ **done**
    (`eval_xpath` in `sidecar/src/exchange.rs`; string value of the first node
    in document order, literal fallback on parse/lookup failure).
-3. **Phase 3 — diagnostics/hover** for unresolved/typed references.
+3. **Phase 3 — diagnostics** for unresolved references. ✅ **done**
+   (`collect_unresolved_refs` in `sidecar/src/exchange.rs`; published as
+   `textDocument/publishDiagnostics` warnings on open/change/send via
+   `Backend::publish_request_var_diagnostics`). Hover remains out of scope.
 
 ## 6. Testing strategy
 
