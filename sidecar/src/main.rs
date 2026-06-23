@@ -5,6 +5,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 mod codelens;
+mod exchange;
 mod http_client;
 mod parser;
 
