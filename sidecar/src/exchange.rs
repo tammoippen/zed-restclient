@@ -12,7 +12,6 @@ pub struct ExchangeMessage {
 }
 
 /// A named request together with what was actually sent and received.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Exchange {
     pub request: ExchangeMessage,
@@ -20,7 +19,6 @@ pub struct Exchange {
 }
 
 /// Per-document cache of named exchanges.
-#[allow(dead_code)]
 pub type ExchangeCache = HashMap<String, Exchange>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

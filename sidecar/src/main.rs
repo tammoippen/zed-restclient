@@ -13,6 +13,9 @@ mod parser;
 struct Backend {
     client: Client,
     document_map: RwLock<HashMap<Url, String>>,
+    // Per-document cache of named request/response exchanges, keyed by
+    // request name. Populated when a named request is sent.
+    response_cache: RwLock<HashMap<Url, exchange::ExchangeCache>>,
 }
 
 #[tower_lsp::async_trait]
@@ -83,6 +86,10 @@ impl LanguageServer for Backend {
             .write()
             .await
             .remove(&params.text_document.uri);
+        self.response_cache
+            .write()
+            .await
+            .remove(&params.text_document.uri);
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
@@ -126,6 +133,23 @@ impl LanguageServer for Backend {
     }
 }
 
+/// Capture the headers and body of a built reqwest request as an
+/// ExchangeMessage, so `{{name.request....}}` references resolve to exactly
+/// what was sent (after variable substitution).
+fn capture_request_message(req: &reqwest::Request) -> exchange::ExchangeMessage {
+    let headers = req
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+        .collect();
+    let body = req
+        .body()
+        .and_then(|b| b.as_bytes())
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_default();
+    exchange::ExchangeMessage { headers, body }
+}
+
 impl Backend {
     async fn handle_send_request(&self, args: Vec<serde_json::Value>) -> anyhow::Result<()> {
         if args.len() < 2 {
@@ -166,8 +190,16 @@ impl Backend {
             .await;
 
         let http_client = reqwest::Client::new();
-        let reqwest_req = match http_client::build_request(&http_client, req, &http_file.variables)
-        {
+        let request_cache = {
+            let cache = self.response_cache.read().await;
+            cache.get(&uri).cloned().unwrap_or_default()
+        };
+        let reqwest_req = match http_client::build_request(
+            &http_client,
+            req,
+            &http_file.variables,
+            &request_cache,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = format!("Failed to build request: {}", e);
@@ -175,6 +207,11 @@ impl Backend {
                 return Err(e);
             }
         };
+
+        // Capture the request exactly as sent (post-resolution) so that
+        // `{{name.request....}}` references can resolve later.
+        let request_message = capture_request_message(&reqwest_req);
+        let request_name = req.name.map(|n| n.to_string());
 
         let response = match http_client.execute(reqwest_req).await {
             Ok(res) => res,
@@ -196,6 +233,25 @@ impl Backend {
         }
         response_text.push('\n');
         response_text.push_str(&body);
+
+        // Cache the exchange under its name for request-variable references.
+        if let Some(name) = request_name {
+            let response_message = exchange::ExchangeMessage {
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+                    .collect(),
+                body: body.clone(),
+            };
+            let mut cache = self.response_cache.write().await;
+            cache.entry(uri.clone()).or_default().insert(
+                name,
+                exchange::Exchange {
+                    request: request_message,
+                    response: response_message,
+                },
+            );
+        }
 
         self.client
             .log_message(
@@ -272,6 +328,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         document_map: RwLock::new(HashMap::new()),
+        response_cache: RwLock::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
