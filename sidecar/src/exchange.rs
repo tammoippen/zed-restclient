@@ -80,9 +80,135 @@ pub fn parse_request_var_ref(inner: &str) -> Option<RequestVarRef<'_>> {
     })
 }
 
+/// Evaluate an accessor against one message of an exchange.
+///
+/// - `headers` → case-insensitive header lookup.
+/// - `body` + `*` → the full body verbatim.
+/// - `body` + `$...` → JSONPath; first match. Scalars render without quotes,
+///   objects/arrays as compact JSON.
+///
+/// Returns `None` when the lookup fails (caller falls back to literal text).
+pub fn eval_accessor(part: Part, accessor: &str, msg: &ExchangeMessage) -> Option<String> {
+    match part {
+        Part::Headers => msg
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(accessor))
+            .map(|(_, v)| v.clone()),
+        Part::Body => {
+            if accessor == "*" {
+                return Some(msg.body.clone());
+            }
+            if accessor.starts_with('$') {
+                return eval_jsonpath(accessor, &msg.body);
+            }
+            // XPath and other accessors land in phase 2.
+            None
+        }
+    }
+}
+
+fn eval_jsonpath(path: &str, body: &str) -> Option<String> {
+    use serde_json_path::JsonPath;
+
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let json_path = JsonPath::parse(path).ok()?;
+    let matched = json_path.query(&value).first()?;
+    Some(render_json_value(matched))
+}
+
+/// Render a matched JSON value: scalars without quotes, structures as compact JSON.
+fn render_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn msg(headers: &[(&str, &str)], body: &str) -> ExchangeMessage {
+        ExchangeMessage {
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive() {
+        let m = msg(&[("X-AuthToken", "abc123")], "");
+        assert_eq!(
+            eval_accessor(Part::Headers, "x-authtoken", &m),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn header_miss_returns_none() {
+        let m = msg(&[("Content-Type", "application/json")], "");
+        assert_eq!(eval_accessor(Part::Headers, "Missing", &m), None);
+    }
+
+    #[test]
+    fn body_star_returns_full_body() {
+        let m = msg(&[], "{\"a\":1}");
+        assert_eq!(
+            eval_accessor(Part::Body, "*", &m),
+            Some("{\"a\":1}".to_string())
+        );
+    }
+
+    #[test]
+    fn jsonpath_scalar_renders_without_quotes() {
+        let m = msg(&[], r#"{"token":"abc123"}"#);
+        assert_eq!(
+            eval_accessor(Part::Body, "$.token", &m),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn jsonpath_nested_and_array() {
+        let m = msg(&[], r#"{"data":{"id":42}}"#);
+        assert_eq!(
+            eval_accessor(Part::Body, "$.data.id", &m),
+            Some("42".to_string())
+        );
+        let arr = msg(&[], r#"[{"id":"first"},{"id":"second"}]"#);
+        assert_eq!(
+            eval_accessor(Part::Body, "$[0].id", &arr),
+            Some("first".to_string())
+        );
+    }
+
+    #[test]
+    fn jsonpath_object_renders_compact_json() {
+        let m = msg(&[], r#"{"data":{"id":42,"name":"x"}}"#);
+        assert_eq!(
+            eval_accessor(Part::Body, "$.data", &m),
+            Some(r#"{"id":42,"name":"x"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn jsonpath_missing_returns_none() {
+        let m = msg(&[], r#"{"token":"abc"}"#);
+        assert_eq!(eval_accessor(Part::Body, "$.nope", &m), None);
+    }
+
+    #[test]
+    fn jsonpath_on_invalid_json_returns_none() {
+        let m = msg(&[], "not json");
+        assert_eq!(eval_accessor(Part::Body, "$.token", &m), None);
+    }
 
     #[test]
     fn parses_header_reference() {
