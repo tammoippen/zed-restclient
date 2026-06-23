@@ -128,6 +128,47 @@ fn render_json_value(value: &serde_json::Value) -> String {
     }
 }
 
+/// Resolve every `{{ name.message.part.accessor }}` request-variable reference
+/// in `text` against the per-document `cache`. References that are not
+/// request-variable shaped, that point at an un-run request, or whose accessor
+/// fails to resolve are left as their literal `{{...}}` text.
+pub fn resolve_request_variables(text: &str, cache: &ExchangeCache) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            // No closing braces — emit the remainder verbatim.
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let inner = &after_open[..close];
+        let literal = &rest[open..open + 2 + close + 2];
+
+        match resolve_one(inner, cache) {
+            Some(value) => out.push_str(&value),
+            None => out.push_str(literal),
+        }
+
+        rest = &after_open[close + 2..];
+    }
+
+    out.push_str(rest);
+    out
+}
+
+fn resolve_one(inner: &str, cache: &ExchangeCache) -> Option<String> {
+    let reference = parse_request_var_ref(inner)?;
+    let exchange = cache.get(reference.name)?;
+    let msg = match reference.message {
+        Message::Request => &exchange.request,
+        Message::Response => &exchange.response,
+    };
+    eval_accessor(reference.part, reference.accessor, msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +249,79 @@ mod tests {
     fn jsonpath_on_invalid_json_returns_none() {
         let m = msg(&[], "not json");
         assert_eq!(eval_accessor(Part::Body, "$.token", &m), None);
+    }
+
+    fn sample_cache() -> ExchangeCache {
+        let mut cache = ExchangeCache::new();
+        cache.insert(
+            "login".to_string(),
+            Exchange {
+                request: msg(&[("Content-Type", "application/json")], r#"{"user":"foo"}"#),
+                response: msg(
+                    &[("X-AuthToken", "tok-42")],
+                    r#"{"data":{"token":"abc123"}}"#,
+                ),
+            },
+        );
+        cache
+    }
+
+    #[test]
+    fn resolves_response_header() {
+        let cache = sample_cache();
+        assert_eq!(
+            resolve_request_variables("{{login.response.headers.X-AuthToken}}", &cache),
+            "tok-42"
+        );
+    }
+
+    #[test]
+    fn resolves_response_body_jsonpath() {
+        let cache = sample_cache();
+        assert_eq!(
+            resolve_request_variables(
+                "Authorization: Bearer {{login.response.body.$.data.token}}",
+                &cache
+            ),
+            "Authorization: Bearer abc123"
+        );
+    }
+
+    #[test]
+    fn resolves_request_body_star() {
+        let cache = sample_cache();
+        assert_eq!(
+            resolve_request_variables("{{login.request.body.*}}", &cache),
+            r#"{"user":"foo"}"#
+        );
+    }
+
+    #[test]
+    fn unknown_request_left_literal() {
+        let cache = sample_cache();
+        let input = "{{missing.response.headers.X}}";
+        assert_eq!(resolve_request_variables(input, &cache), input);
+    }
+
+    #[test]
+    fn unresolved_accessor_left_literal() {
+        let cache = sample_cache();
+        let input = "{{login.response.body.$.nope}}";
+        assert_eq!(resolve_request_variables(input, &cache), input);
+    }
+
+    #[test]
+    fn non_reference_left_literal() {
+        let cache = sample_cache();
+        let input = "{{baseUrl}}/x {{$guid}}";
+        assert_eq!(resolve_request_variables(input, &cache), input);
+    }
+
+    #[test]
+    fn multiple_refs_in_one_string() {
+        let cache = sample_cache();
+        let input = "{{login.response.headers.X-AuthToken}}-{{login.response.body.$.data.token}}";
+        assert_eq!(resolve_request_variables(input, &cache), "tok-42-abc123");
     }
 
     #[test]
