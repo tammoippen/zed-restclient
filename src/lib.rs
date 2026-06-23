@@ -6,6 +6,8 @@ struct RestClientExtension {
 }
 
 impl RestClientExtension {
+    // Kept for the production download path; unused on the dev-local branch.
+    #[allow(dead_code)]
     fn language_server_binary_path(
         &mut self,
         language_server_id: &zed::LanguageServerId,
@@ -98,36 +100,21 @@ impl zed::Extension for RestClientExtension {
 
     fn language_server_command(
         &mut self,
-        language_server_id: &zed::LanguageServerId,
+        _language_server_id: &zed::LanguageServerId,
         _worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        // --- PRODUCTION ---
-        // Dies lädt das vorkompilierte Sidecar aus den GitHub Releases herunter.
-        let binary_path = self.language_server_binary_path(language_server_id)?;
+        // --- LOCAL DEV (dev-local branch) ---
+        // Run the locally-built sidecar directly instead of downloading the
+        // upstream prebuilt binary, so local changes (e.g. {{$dotenv}} and
+        // showRequest) actually take effect. Run `cargo build -p sidecar
+        // --release` first. showRequest is controlled via Zed `lsp` settings;
+        // to force it on here instead, add an env entry below, e.g.
+        // ("ZED_RESTCLIENT_SHOW_REQUEST".to_string(), "true".to_string()).
         Ok(zed::Command {
-            command: binary_path,
+            command: "/Users/tammo/repos/zed-restclient/target/release/sidecar".to_string(),
             args: vec![],
             env: vec![],
         })
-
-        // --- LOKALE ENTWICKLUNG ---
-        // Wenn du lokal testest, kommentiere den Produktions-Code oben aus
-        // und entferne die Kommentare hier unten.
-        /*
-        let manifest_path = "/home/dr/s3solutions/zed-rest-client-root/zed-restclient/sidecar/Cargo.toml";
-        Ok(zed::Command {
-            command: "/usr/bin/cargo".to_string(),
-            args: vec![
-                "run".to_string(),
-                "-q".to_string(),
-                "--manifest-path".to_string(),
-                manifest_path.to_string(),
-                "--bin".to_string(),
-                "sidecar".to_string(),
-            ],
-            env: vec![],
-        })
-        */
     }
 }
 
