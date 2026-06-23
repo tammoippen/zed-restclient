@@ -7,10 +7,21 @@ use std::str::FromStr;
 fn process_auth_header(value: &str) -> String {
     if let Some(stripped) = value.strip_prefix("Basic ") {
         let remainder = stripped.trim();
-        // If it contains a space, it's likely "username password"
-        if let Some((user, pass)) = remainder.split_once(' ') {
-            let auth = format!("{}:{}", user.trim(), pass.trim());
-            let encoded = BASE64_STANDARD.encode(auth);
+
+        // Accept plaintext credentials as either "username password" (space) or
+        // "username:password" (colon) and base64-encode them. A single token
+        // with neither separator is assumed to be already base64-encoded and is
+        // left untouched (base64 never contains a space or colon).
+        let credentials = if let Some((user, pass)) = remainder.split_once(' ') {
+            Some(format!("{}:{}", user.trim(), pass.trim()))
+        } else if let Some((user, pass)) = remainder.split_once(':') {
+            Some(format!("{}:{}", user.trim(), pass.trim()))
+        } else {
+            None
+        };
+
+        if let Some(credentials) = credentials {
+            let encoded = BASE64_STANDARD.encode(credentials);
             return format!("Basic {}", encoded);
         }
     }
@@ -262,6 +273,80 @@ mod tests {
             .to_str()
             .unwrap();
         // "admin:secret" in base64 is "YWRtaW46c2VjcmV0"
+        assert_eq!(auth_header, "Basic YWRtaW46c2VjcmV0");
+    }
+
+    #[test]
+    fn test_basic_auth_colon_form() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "GET",
+            url: "https://httpbin.org/basic-auth/user/passwd",
+            // Colon-separated credentials (the form many users write).
+            headers: vec![("Authorization", "Basic user:passwd")],
+            body: None,
+        };
+
+        let reqwest_req =
+            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+
+        let auth_header = reqwest_req
+            .headers()
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // "user:passwd" in base64 is "dXNlcjpwYXNzd2Q="
+        assert_eq!(auth_header, "Basic dXNlcjpwYXNzd2Q=");
+    }
+
+    #[test]
+    fn test_basic_auth_colon_form_with_variables() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "GET",
+            url: "https://api.example.com/tokens",
+            headers: vec![("Authorization", "Basic {{user}}:{{password}}")],
+            body: None,
+        };
+
+        let mut vars = HashMap::new();
+        vars.insert("user", "admin");
+        vars.insert("password", "secret");
+
+        let reqwest_req =
+            build_request(&client, &http_req, &vars).expect("Failed to build request");
+
+        let auth_header = reqwest_req
+            .headers()
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // "admin:secret" in base64 is "YWRtaW46c2VjcmV0"
+        assert_eq!(auth_header, "Basic YWRtaW46c2VjcmV0");
+    }
+
+    #[test]
+    fn test_basic_auth_preencoded_passthrough() {
+        let client = Client::new();
+        let http_req = HttpRequest {
+            method: "GET",
+            url: "https://api.example.com/tokens",
+            // Already base64-encoded: must be left untouched.
+            headers: vec![("Authorization", "Basic YWRtaW46c2VjcmV0")],
+            body: None,
+        };
+
+        let reqwest_req =
+            build_request(&client, &http_req, &HashMap::new()).expect("Failed to build request");
+
+        let auth_header = reqwest_req
+            .headers()
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(auth_header, "Basic YWRtaW46c2VjcmV0");
     }
 }
