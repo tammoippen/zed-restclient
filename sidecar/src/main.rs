@@ -8,6 +8,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 mod codelens;
 mod exchange;
 mod http_client;
+mod opener;
 mod parser;
 
 /// Default for whether the resolved request is shown above the response.
@@ -395,7 +396,18 @@ impl Backend {
             return Err(e.into());
         }
 
-        if let Ok(url) = Url::from_file_path(&file_path) {
+        // Open the response, preferring the Zed CLI so it reuses the current
+        // window (and existing tab) instead of opening a new window or relying
+        // on the OS file association. `window/showDocument` is a no-op for local
+        // files in Zed today, so it is only a secondary fallback.
+        if let Some(cli) = opener::open_with_zed_cli(&file_path) {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    format!("Opened response via Zed CLI: {}", cli.display()),
+                )
+                .await;
+        } else if let Ok(url) = Url::from_file_path(&file_path) {
             let result = self
                 .client
                 .show_document(ShowDocumentParams {
@@ -407,32 +419,10 @@ impl Backend {
                 .await;
 
             if result.is_err() {
-                // Fallback for older Zed versions or if window/showDocument is not supported
-                let path_str = file_path.to_string_lossy();
-                let opened = ["zeditor", "zed", "zed-preview", "zed-nightly"]
-                    .iter()
-                    .any(|cmd| {
-                        std::process::Command::new(cmd)
-                            .arg(path_str.as_ref())
-                            .spawn()
-                            .is_ok()
-                    });
-
-                if !opened {
-                    #[cfg(target_os = "macos")]
-                    let _ = std::process::Command::new("open")
-                        .arg(path_str.as_ref())
-                        .spawn();
-                    #[cfg(target_os = "linux")]
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(path_str.as_ref())
-                        .spawn();
-                    #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", path_str.as_ref()])
-                        .spawn();
-                }
+                opener::open_with_os(&file_path);
             }
+        } else {
+            opener::open_with_os(&file_path);
         }
 
         Ok(())
