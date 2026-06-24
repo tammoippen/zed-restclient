@@ -46,6 +46,12 @@ Accept: application/json
 
 Then click the **▶ Send Request** button (Code Lens) that appears directly above the `GET` line.
 
+### How the response opens
+
+The response is written to a scratch `.http` file and opened in your **running Zed window**, reusing the same tab on subsequent requests. The sidecar finds the Zed CLI automatically — first the running instance (via its process), then `PATH`, then well-known install locations — so it no longer depends on `PATH` or the `.http` file association. If discovery ever fails, set `ZED_RESTCLIENT_ZED_BIN` to the absolute path of your Zed CLI.
+
+> **Pane placement:** Zed's CLI and LSP protocol provide no way for an external process to target a specific pane or force a split, so the response opens in the **active pane** of the current window. Move the response tab into a split once; because the tab is reused, later sends update it in place.
+
 ## 🤝 Contributing
 
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
