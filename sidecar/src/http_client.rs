@@ -1,3 +1,4 @@
+use crate::exchange::ExchangeCache;
 use crate::parser::HttpRequest;
 use base64::prelude::*;
 use reqwest::{Client, Method, Request};
@@ -195,16 +196,21 @@ fn resolve_variables(
     text: &str,
     variables: &HashMap<&str, &str>,
     dotenv: &HashMap<String, String>,
+    request_cache: &ExchangeCache,
 ) -> String {
     let mut resolved = text.to_string();
 
-    // 1. Resolve custom user variables from the file
+    // 1. Resolve custom user variables from the file (their values may
+    //    themselves contain request-variable references).
     for (key, value) in variables {
         let placeholder = format!("{{{{{}}}}}", key);
         resolved = resolved.replace(&placeholder, value);
     }
 
-    // 2. Resolve built-in system variables (including $dotenv / $processEnv)
+    // 2. Resolve request variables ({{name.response.body.$...}}) from the cache.
+    resolved = crate::exchange::resolve_request_variables(&resolved, request_cache);
+
+    // 3. Resolve built-in system variables (including $dotenv / $processEnv)
     resolve_system_variables(&resolved, dotenv)
 }
 
@@ -217,18 +223,19 @@ pub fn build_request(
     req: &HttpRequest<'_>,
     variables: &HashMap<&str, &str>,
     base_dir: Option<&Path>,
+    request_cache: &ExchangeCache,
 ) -> anyhow::Result<Request> {
     let method = Method::from_str(req.method)
         .map_err(|_| anyhow::anyhow!("Invalid HTTP Method: {}", req.method))?;
 
     let dotenv = base_dir.map(load_dotenv).unwrap_or_default();
 
-    let url = resolve_variables(req.url, variables, &dotenv);
+    let url = resolve_variables(req.url, variables, &dotenv, request_cache);
     let mut request_builder = client.request(method, &url);
 
     for (key, value) in &req.headers {
-        let resolved_key = resolve_variables(key, variables, &dotenv);
-        let mut resolved_value = resolve_variables(value, variables, &dotenv);
+        let resolved_key = resolve_variables(key, variables, &dotenv, request_cache);
+        let mut resolved_value = resolve_variables(value, variables, &dotenv, request_cache);
 
         if resolved_key.to_lowercase() == "authorization" {
             resolved_value = process_auth_header(&resolved_value);
@@ -239,7 +246,7 @@ pub fn build_request(
 
     if let Some(body_text) = req.body {
         let stripped = strip_body_comments(body_text);
-        let resolved_body = resolve_variables(&stripped, variables, &dotenv);
+        let resolved_body = resolve_variables(&stripped, variables, &dotenv, request_cache);
         // A body consisting only of comments/whitespace is treated as no body.
         if !resolved_body.trim().is_empty() {
             request_builder = request_builder.body(resolved_body);
@@ -309,14 +316,21 @@ mod tests {
     fn test_build_request() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "POST",
             url: "https://httpbin.org/post",
             headers: vec![("Content-Type", "application/json"), ("X-Custom", "Test")],
             body: Some("{\"hello\":\"world\"}"),
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         // Verify Method
         assert_eq!(reqwest_req.method(), Method::POST);
@@ -338,6 +352,7 @@ mod tests {
     fn test_build_request_with_variables() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "{{baseUrl}}/api/{{userId}}",
             headers: vec![("Authorization", "Bearer {{token}}")],
@@ -349,8 +364,8 @@ mod tests {
         vars.insert("userId", "123");
         vars.insert("token", "secret123");
 
-        let reqwest_req =
-            build_request(&client, &http_req, &vars, None).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &vars, None, &ExchangeCache::new())
+            .expect("Failed to build request");
 
         assert_eq!(
             reqwest_req.url().as_str(),
@@ -365,19 +380,70 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_with_request_variables() {
+        use crate::exchange::{Exchange, ExchangeMessage};
+
+        let client = Client::new();
+        let http_req = HttpRequest {
+            name: None,
+            method: "GET",
+            url: "https://api.example.com/comments/{{login.response.body.$.id}}",
+            headers: vec![(
+                "Authorization",
+                "Bearer {{login.response.headers.X-AuthToken}}",
+            )],
+            body: None,
+        };
+
+        let mut cache = ExchangeCache::new();
+        cache.insert(
+            "login".to_string(),
+            Exchange {
+                request: ExchangeMessage::default(),
+                response: ExchangeMessage {
+                    headers: vec![("X-AuthToken".to_string(), "tok-99".to_string())],
+                    body: r#"{"id":7}"#.to_string(),
+                },
+            },
+        );
+
+        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None, &cache)
+            .expect("Failed to build request");
+
+        assert_eq!(
+            reqwest_req.url().as_str(),
+            "https://api.example.com/comments/7"
+        );
+        assert_eq!(
+            reqwest_req.headers().get("Authorization").unwrap(),
+            "Bearer tok-99"
+        );
+    }
+
+    #[test]
     fn test_system_variables() {
         let vars = HashMap::new();
         let dotenv = HashMap::new();
 
-        let guid_text = resolve_variables("id: {{$guid}}", &vars, &dotenv);
+        let guid_text = resolve_variables("id: {{$guid}}", &vars, &dotenv, &ExchangeCache::new());
         assert!(guid_text.starts_with("id: "));
         assert_eq!(guid_text.len(), 4 + 36); // "id: " + 36 char UUID
 
-        let dt_iso = resolve_variables("time: {{$datetime iso8601}}", &vars, &dotenv);
+        let dt_iso = resolve_variables(
+            "time: {{$datetime iso8601}}",
+            &vars,
+            &dotenv,
+            &ExchangeCache::new(),
+        );
         assert!(dt_iso.contains('T')); // ISO8601 has a 'T'
         assert!(dt_iso.contains('+') || dt_iso.contains('Z'));
 
-        let rand_int = resolve_variables("number: {{$randomInt 10 20}}", &vars, &dotenv);
+        let rand_int = resolve_variables(
+            "number: {{$randomInt 10 20}}",
+            &vars,
+            &dotenv,
+            &ExchangeCache::new(),
+        );
         let num_str = rand_int.strip_prefix("number: ").unwrap();
         let num: i32 = num_str.parse().unwrap();
         assert!((10..=20).contains(&num));
@@ -408,11 +474,17 @@ mod tests {
         dotenv.insert("USERNAME".to_string(), "alice".to_string());
 
         // Direct usage in a request field.
-        let resolved = resolve_variables("user: {{$dotenv USERNAME}}", &vars, &dotenv);
+        let resolved = resolve_variables(
+            "user: {{$dotenv USERNAME}}",
+            &vars,
+            &dotenv,
+            &ExchangeCache::new(),
+        );
         assert_eq!(resolved, "user: alice");
 
         // Unknown name resolves to empty string.
-        let missing = resolve_variables("x: {{$dotenv NOPE}}", &vars, &dotenv);
+        let missing =
+            resolve_variables("x: {{$dotenv NOPE}}", &vars, &dotenv, &ExchangeCache::new());
         assert_eq!(missing, "x: ");
     }
 
@@ -424,7 +496,12 @@ mod tests {
         let mut dotenv = HashMap::new();
         dotenv.insert("USERNAME".to_string(), "bob".to_string());
 
-        let resolved = resolve_variables("{{user}}@example.com", &vars, &dotenv);
+        let resolved = resolve_variables(
+            "{{user}}@example.com",
+            &vars,
+            &dotenv,
+            &ExchangeCache::new(),
+        );
         assert_eq!(resolved, "bob@example.com");
     }
 
@@ -441,6 +518,7 @@ mod tests {
             "token: {{$processEnv SIDECAR_TEST_PROCENV}}",
             &vars,
             &dotenv,
+            &ExchangeCache::new(),
         );
         assert_eq!(resolved, "token: from-proc-env");
     }
@@ -458,14 +536,21 @@ mod tests {
 
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://api.example.com/me",
             headers: vec![("Authorization", "Bearer {{$dotenv TOKEN}}")],
             body: None,
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), Some(dir.as_path()))
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            Some(dir.as_path()),
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         assert_eq!(
             reqwest_req.headers().get("Authorization").unwrap(),
@@ -479,14 +564,21 @@ mod tests {
     fn test_basic_auth_encoding() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://httpbin.org/basic-auth/user/passwd",
             headers: vec![("Authorization", "Basic user passwd")],
             body: None,
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
@@ -502,6 +594,7 @@ mod tests {
     fn test_basic_auth_with_variables() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://httpbin.org/basic-auth/admin/secret",
             headers: vec![("Authorization", "Basic {{user}} {{pass}}")],
@@ -512,8 +605,8 @@ mod tests {
         vars.insert("user", "admin");
         vars.insert("pass", "secret");
 
-        let reqwest_req =
-            build_request(&client, &http_req, &vars, None).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &vars, None, &ExchangeCache::new())
+            .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
@@ -529,6 +622,7 @@ mod tests {
     fn test_render_request() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "POST",
             url: "https://api.example.com/users",
             headers: vec![
@@ -538,8 +632,14 @@ mod tests {
             body: Some("{\"name\":\"John\"}"),
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         let rendered = render_request(&reqwest_req);
 
@@ -554,14 +654,21 @@ mod tests {
     fn test_render_request_no_body() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://api.example.com/ping",
             headers: vec![("Accept", "application/json")],
             body: None,
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         let rendered = render_request(&reqwest_req);
         assert!(rendered.starts_with("GET https://api.example.com/ping\n"));
@@ -574,6 +681,7 @@ mod tests {
     fn test_basic_auth_colon_form() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://httpbin.org/basic-auth/user/passwd",
             // Colon-separated credentials (the form many users write).
@@ -581,8 +689,14 @@ mod tests {
             body: None,
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
@@ -598,6 +712,7 @@ mod tests {
     fn test_basic_auth_colon_form_with_variables() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://api.example.com/tokens",
             headers: vec![("Authorization", "Basic {{user}}:{{password}}")],
@@ -608,8 +723,8 @@ mod tests {
         vars.insert("user", "admin");
         vars.insert("password", "secret");
 
-        let reqwest_req =
-            build_request(&client, &http_req, &vars, None).expect("Failed to build request");
+        let reqwest_req = build_request(&client, &http_req, &vars, None, &ExchangeCache::new())
+            .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
@@ -625,6 +740,7 @@ mod tests {
     fn test_basic_auth_preencoded_passthrough() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://api.example.com/tokens",
             // Already base64-encoded: must be left untouched.
@@ -632,8 +748,14 @@ mod tests {
             body: None,
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         let auth_header = reqwest_req
             .headers()
@@ -693,14 +815,21 @@ mod tests {
     fn test_build_request_strips_body_comments() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "POST",
             url: "https://api.example.com/values",
             headers: vec![("Content-Type", "application/json")],
             body: Some("# leading comment\n{\"a\":1}\n# trailing comment"),
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         let body_bytes = reqwest_req.body().unwrap().as_bytes().unwrap();
         assert_eq!(body_bytes, b"{\"a\":1}");
@@ -710,6 +839,7 @@ mod tests {
     fn test_build_request_comment_only_body_sends_no_body() {
         let client = Client::new();
         let http_req = HttpRequest {
+            name: None,
             method: "GET",
             url: "https://api.example.com/values",
             headers: vec![("Authorization", "Bearer token")],
@@ -717,8 +847,14 @@ mod tests {
             body: Some("# some comment here"),
         };
 
-        let reqwest_req = build_request(&client, &http_req, &HashMap::new(), None)
-            .expect("Failed to build request");
+        let reqwest_req = build_request(
+            &client,
+            &http_req,
+            &HashMap::new(),
+            None,
+            &ExchangeCache::new(),
+        )
+        .expect("Failed to build request");
 
         assert!(reqwest_req.body().is_none());
     }

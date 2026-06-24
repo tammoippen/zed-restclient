@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 mod codelens;
+mod exchange;
 mod http_client;
 mod parser;
 
@@ -18,6 +19,9 @@ struct Backend {
     document_map: RwLock<HashMap<Url, String>>,
     /// Whether to include the resolved request above the response output.
     show_request: AtomicBool,
+    // Per-document cache of named request/response exchanges, keyed by
+    // request name. Populated when a named request is sent.
+    response_cache: RwLock<HashMap<Url, exchange::ExchangeCache>>,
 }
 
 /// Resolves the `showRequest` setting. Precedence:
@@ -100,17 +104,27 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, format!("Opened file: {}", uri))
             .await;
+
+        self.publish_request_var_diagnostics(uri).await;
     }
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.pop() {
-            self.document_map.write().await.insert(uri, change.text);
+            self.document_map
+                .write()
+                .await
+                .insert(uri.clone(), change.text);
+            self.publish_request_var_diagnostics(uri).await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.document_map
+            .write()
+            .await
+            .remove(&params.text_document.uri);
+        self.response_cache
             .write()
             .await
             .remove(&params.text_document.uri);
@@ -157,7 +171,76 @@ impl LanguageServer for Backend {
     }
 }
 
+/// Convert a byte offset into an LSP `Position` (line + UTF-16 character).
+fn offset_to_position(text: &str, offset: usize) -> Position {
+    let offset = offset.min(text.len());
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            line_start = idx + ch.len_utf8();
+        }
+    }
+    let character = text[line_start..offset].encode_utf16().count() as u32;
+    Position { line, character }
+}
+
+/// Capture the headers and body of a built reqwest request as an
+/// ExchangeMessage, so `{{name.request....}}` references resolve to exactly
+/// what was sent (after variable substitution).
+fn capture_request_message(req: &reqwest::Request) -> exchange::ExchangeMessage {
+    let headers = req
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+        .collect();
+    let body = req
+        .body()
+        .and_then(|b| b.as_bytes())
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_default();
+    exchange::ExchangeMessage { headers, body }
+}
+
 impl Backend {
+    /// Recompute and publish diagnostics for unresolved request-variable
+    /// references in the given document.
+    async fn publish_request_var_diagnostics(&self, uri: Url) {
+        let text = match self.document_map.read().await.get(&uri) {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        let cache = self
+            .response_cache
+            .read()
+            .await
+            .get(&uri)
+            .cloned()
+            .unwrap_or_default();
+
+        let diagnostics = exchange::collect_unresolved_refs(&text, &cache)
+            .into_iter()
+            .map(|r| Diagnostic {
+                range: Range {
+                    start: offset_to_position(&text, r.start),
+                    end: offset_to_position(&text, r.end),
+                },
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some("zed-restclient".to_string()),
+                message: r.message,
+                ..Default::default()
+            })
+            .collect();
+
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
+    }
+
     async fn handle_send_request(&self, args: Vec<serde_json::Value>) -> anyhow::Result<()> {
         if args.len() < 2 {
             anyhow::bail!("Invalid arguments for send_request. Expected URI and block index.");
@@ -203,11 +286,16 @@ impl Backend {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
         let http_client = reqwest::Client::new();
+        let request_cache = {
+            let cache = self.response_cache.read().await;
+            cache.get(&uri).cloned().unwrap_or_default()
+        };
         let reqwest_req = match http_client::build_request(
             &http_client,
             req,
             &http_file.variables,
             base_dir.as_deref(),
+            &request_cache,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -219,6 +307,11 @@ impl Backend {
 
         // Capture the resolved request now, before `execute` consumes it.
         let request_preview = http_client::render_request(&reqwest_req);
+
+        // Capture the request exactly as sent (post-resolution) so that
+        // `{{name.request....}}` references can resolve later.
+        let request_message = capture_request_message(&reqwest_req);
+        let request_name = req.name.map(|n| n.to_string());
 
         let response = match http_client.execute(reqwest_req).await {
             Ok(res) => res,
@@ -254,6 +347,30 @@ impl Backend {
         }
         response_text.push('\n');
         response_text.push_str(&body);
+
+        // Cache the exchange under its name for request-variable references.
+        if let Some(name) = request_name {
+            let response_message = exchange::ExchangeMessage {
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+                    .collect(),
+                body: body.clone(),
+            };
+            {
+                let mut cache = self.response_cache.write().await;
+                cache.entry(uri.clone()).or_default().insert(
+                    name,
+                    exchange::Exchange {
+                        request: request_message,
+                        response: response_message,
+                    },
+                );
+            }
+            // The cache changed, so references that were unresolved may now
+            // resolve (and vice versa) — refresh diagnostics.
+            self.publish_request_var_diagnostics(uri.clone()).await;
+        }
 
         self.client
             .log_message(
@@ -331,6 +448,7 @@ async fn main() {
         client,
         document_map: RwLock::new(HashMap::new()),
         show_request: AtomicBool::new(DEFAULT_SHOW_REQUEST),
+        response_cache: RwLock::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
@@ -357,5 +475,40 @@ mod tests {
         // Unrelated options also fall back to default.
         let opts = json!({ "somethingElse": 1 });
         assert_eq!(resolve_show_request(Some(&opts)), DEFAULT_SHOW_REQUEST);
+    }
+
+    #[test]
+    fn offset_to_position_first_line() {
+        let text = "GET {{x}}";
+        let pos = offset_to_position(text, 4);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 4);
+    }
+
+    #[test]
+    fn offset_to_position_later_line() {
+        let text = "line0\nline1\nGET {{x}}";
+        let offset = text.find("{{").unwrap();
+        let pos = offset_to_position(text, offset);
+        assert_eq!(pos.line, 2);
+        assert_eq!(pos.character, 4);
+    }
+
+    #[test]
+    fn offset_to_position_counts_utf16_units() {
+        // 'é' is one char but lives before the offset on the same line.
+        let text = "é{{x}}";
+        let offset = text.find("{{").unwrap();
+        let pos = offset_to_position(text, offset);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 1); // one UTF-16 unit for 'é'
+    }
+
+    #[test]
+    fn offset_to_position_clamps_past_end() {
+        let text = "abc";
+        let pos = offset_to_position(text, 999);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 3);
     }
 }

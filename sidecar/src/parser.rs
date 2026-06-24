@@ -3,10 +3,30 @@ use std::collections::HashMap;
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct HttpRequest<'a> {
+    pub name: Option<&'a str>,
     pub method: &'a str,
     pub url: &'a str,
     pub headers: Vec<(&'a str, &'a str)>,
     pub body: Option<&'a str>,
+}
+
+/// Parse a `# @name <name>` / `// @name <name>` / `# @name=<name>` marker line.
+/// Returns the captured name when the trimmed line is such a marker.
+fn parse_name_marker(trimmed: &str) -> Option<&str> {
+    let rest = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix("//"))?
+        .trim_start();
+    let rest = rest.strip_prefix("@name")?;
+    // Must be followed by whitespace or '='; otherwise it's e.g. "@namespace".
+    let rest = match rest.chars().next() {
+        Some('=') => &rest[1..],
+        Some(c) if c.is_whitespace() => rest,
+        None => return None,
+        _ => return None,
+    };
+    let name = rest.trim();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[allow(dead_code)]
@@ -25,6 +45,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
     let mut current_method = "GET";
     let mut current_url = "";
     let mut current_headers = Vec::new();
+    let mut current_name: Option<&str> = None;
     let mut parsing_body = false;
     let mut body_start_idx = None;
     let mut body_end_idx = None;
@@ -53,6 +74,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
                 };
 
                 requests.push(HttpRequest {
+                    name: current_name,
                     method: current_method,
                     url: current_url,
                     headers: current_headers.clone(),
@@ -65,6 +87,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
             current_method = "GET";
             current_url = "";
             current_headers.clear();
+            current_name = None;
             parsing_body = false;
             body_start_idx = None;
             body_end_idx = None;
@@ -73,6 +96,10 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
 
         if looking_for_request {
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+                // A comment line may carry a `@name` marker for the next request.
+                if let Some(name) = parse_name_marker(trimmed) {
+                    current_name = Some(name);
+                }
                 continue;
             }
 
@@ -153,6 +180,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
         };
 
         requests.push(HttpRequest {
+            name: current_name,
             method: current_method,
             url: current_url,
             headers: current_headers,
@@ -224,6 +252,45 @@ PUT http://localhost:8080/2
         assert_eq!(file.requests.len(), 2);
         assert_eq!(file.requests[0].method, "GET");
         assert_eq!(file.requests[1].method, "PUT");
+    }
+
+    #[test]
+    fn test_parse_name_hash() {
+        let content = "# @name login\nPOST https://example.com/login\n";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests.len(), 1);
+        assert_eq!(file.requests[0].name, Some("login"));
+    }
+
+    #[test]
+    fn test_parse_name_slash() {
+        let content = "// @name login\nPOST https://example.com/login\n";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests.len(), 1);
+        assert_eq!(file.requests[0].name, Some("login"));
+    }
+
+    #[test]
+    fn test_parse_name_equals() {
+        let content = "# @name=login\nPOST https://example.com/login\n";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests[0].name, Some("login"));
+    }
+
+    #[test]
+    fn test_name_resets_across_separator() {
+        let content = "# @name login\nGET http://a/1\n###\nGET http://a/2\n";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests.len(), 2);
+        assert_eq!(file.requests[0].name, Some("login"));
+        assert_eq!(file.requests[1].name, None);
+    }
+
+    #[test]
+    fn test_no_name_is_none() {
+        let content = "GET https://api.example.com/users";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests[0].name, None);
     }
 
     #[test]
