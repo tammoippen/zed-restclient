@@ -4,7 +4,10 @@ use std::collections::HashMap;
 #[derive(Debug, PartialEq)]
 pub struct HttpRequest<'a> {
     pub method: &'a str,
-    pub url: &'a str,
+    /// The request URL. Owned because indented continuation lines following
+    /// the request line (e.g. a long query string split over several lines)
+    /// are concatenated onto it.
+    pub url: String,
     pub headers: Vec<(&'a str, &'a str)>,
     pub body: Option<&'a str>,
 }
@@ -23,7 +26,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
     let mut looking_for_request = true;
 
     let mut current_method = "GET";
-    let mut current_url = "";
+    let mut current_url = String::new();
     let mut current_headers = Vec::new();
     let mut parsing_body = false;
     let mut body_start_idx = None;
@@ -54,7 +57,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
 
                 requests.push(HttpRequest {
                     method: current_method,
-                    url: current_url,
+                    url: current_url.clone(),
                     headers: current_headers.clone(),
                     body,
                 });
@@ -63,7 +66,7 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
             // Reset state for the next request
             looking_for_request = true;
             current_method = "GET";
-            current_url = "";
+            current_url.clear();
             current_headers.clear();
             parsing_body = false;
             body_start_idx = None;
@@ -90,10 +93,10 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
             if !parts.is_empty() {
                 if parts.len() >= 2 {
                     current_method = parts[0];
-                    current_url = parts[1];
+                    current_url = parts[1].to_string();
                 } else {
                     current_method = "GET";
-                    current_url = parts[0];
+                    current_url = parts[0].to_string();
                 }
                 looking_for_request = false;
             }
@@ -126,6 +129,17 @@ pub fn parse_http_file(content: &str) -> HttpFile<'_> {
 
                 body_start_idx = Some(actual_start);
                 body_end_idx = Some(actual_start);
+            } else if current_headers.is_empty()
+                && !trimmed.is_empty()
+                && line.starts_with([' ', '\t'])
+            {
+                // An indented line immediately following the request line is a
+                // continuation of the URL (e.g. a long query string split over
+                // several lines). The indentation is the signal; we trim it and
+                // append the content directly to the URL. This must be checked
+                // before the header rule below, since a continuation such as
+                // `&redirect_uri=https://...` contains a ':'.
+                current_url.push_str(trimmed);
             } else if trimmed.starts_with('#') || trimmed.starts_with("//") {
                 // Ignore comments in headers
                 continue;
@@ -224,6 +238,35 @@ PUT http://localhost:8080/2
         assert_eq!(file.requests.len(), 2);
         assert_eq!(file.requests[0].method, "GET");
         assert_eq!(file.requests[1].method, "PUT");
+    }
+
+    #[test]
+    fn test_multiline_url_continuation() {
+        let content = "POST https://accounts.zoho.eu/oauth/v2/token\n    ?client_id={{client_id}}\n    &grant_type=client_credentials\n    &scope=ZohoCRM.modules.ALL,ZohoCRM.bulk.READ\n";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests.len(), 1);
+        assert_eq!(file.requests[0].method, "POST");
+        assert_eq!(
+            file.requests[0].url,
+            "https://accounts.zoho.eu/oauth/v2/token?client_id={{client_id}}&grant_type=client_credentials&scope=ZohoCRM.modules.ALL,ZohoCRM.bulk.READ"
+        );
+        assert!(file.requests[0].headers.is_empty());
+    }
+
+    #[test]
+    fn test_multiline_url_then_headers_and_body() {
+        // Indented continuations attach to the URL; a non-indented header line
+        // ends the continuation, and a blank line then starts the body.
+        let content = "GET https://api.example.com/search\n    ?q=hello\n    &page=2\nAccept: application/json\n\n{\"k\":1}\n";
+        let file = parse_http_file(content);
+        assert_eq!(file.requests.len(), 1);
+        assert_eq!(
+            file.requests[0].url,
+            "https://api.example.com/search?q=hello&page=2"
+        );
+        assert_eq!(file.requests[0].headers.len(), 1);
+        assert_eq!(file.requests[0].headers[0], ("Accept", "application/json"));
+        assert_eq!(file.requests[0].body, Some("{\"k\":1}"));
     }
 
     #[test]

@@ -107,7 +107,7 @@ pub fn build_request(
     let method = Method::from_str(req.method)
         .map_err(|_| anyhow::anyhow!("Invalid HTTP Method: {}", req.method))?;
 
-    let url = resolve_variables(req.url, variables);
+    let url = resolve_variables(&req.url, variables);
     let mut request_builder = client.request(method, &url);
 
     for (key, value) in &req.headers {
@@ -143,7 +143,7 @@ mod tests {
         let client = Client::new();
         let http_req = HttpRequest {
             method: "POST",
-            url: "https://httpbin.org/post",
+            url: "https://httpbin.org/post".to_string(),
             headers: vec![("Content-Type", "application/json"), ("X-Custom", "Test")],
             body: Some("{\"hello\":\"world\"}"),
         };
@@ -172,7 +172,7 @@ mod tests {
         let client = Client::new();
         let http_req = HttpRequest {
             method: "GET",
-            url: "{{baseUrl}}/api/{{userId}}",
+            url: "{{baseUrl}}/api/{{userId}}".to_string(),
             headers: vec![("Authorization", "Bearer {{token}}")],
             body: Some("{\"id\":\"{{userId}}\"}"),
         };
@@ -220,7 +220,7 @@ mod tests {
         let client = Client::new();
         let http_req = HttpRequest {
             method: "GET",
-            url: "https://httpbin.org/basic-auth/user/passwd",
+            url: "https://httpbin.org/basic-auth/user/passwd".to_string(),
             headers: vec![("Authorization", "Basic user passwd")],
             body: None,
         };
@@ -243,7 +243,7 @@ mod tests {
         let client = Client::new();
         let http_req = HttpRequest {
             method: "GET",
-            url: "https://httpbin.org/basic-auth/admin/secret",
+            url: "https://httpbin.org/basic-auth/admin/secret".to_string(),
             headers: vec![("Authorization", "Basic {{user}} {{pass}}")],
             body: None,
         };
