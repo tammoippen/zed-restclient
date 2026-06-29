@@ -230,7 +230,7 @@ pub fn build_request(
 
     let dotenv = base_dir.map(load_dotenv).unwrap_or_default();
 
-    let url = resolve_variables(req.url, variables, &dotenv, request_cache);
+    let url = resolve_variables(&req.url, variables, &dotenv, request_cache);
     let mut request_builder = client.request(method, &url);
 
     for (key, value) in &req.headers {
@@ -318,7 +318,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "POST",
-            url: "https://httpbin.org/post",
+            url: "https://httpbin.org/post".to_string(),
             headers: vec![("Content-Type", "application/json"), ("X-Custom", "Test")],
             body: Some("{\"hello\":\"world\"}"),
         };
@@ -354,7 +354,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "{{baseUrl}}/api/{{userId}}",
+            url: "{{baseUrl}}/api/{{userId}}".to_string(),
             headers: vec![("Authorization", "Bearer {{token}}")],
             body: Some("{\"id\":\"{{userId}}\"}"),
         };
@@ -387,7 +387,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://api.example.com/comments/{{login.response.body.$.id}}",
+            url: "https://api.example.com/comments/{{login.response.body.$.id}}".to_string(),
             headers: vec![(
                 "Authorization",
                 "Bearer {{login.response.headers.X-AuthToken}}",
@@ -538,7 +538,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://api.example.com/me",
+            url: "https://api.example.com/me".to_string(),
             headers: vec![("Authorization", "Bearer {{$dotenv TOKEN}}")],
             body: None,
         };
@@ -566,7 +566,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://httpbin.org/basic-auth/user/passwd",
+            url: "https://httpbin.org/basic-auth/user/passwd".to_string(),
             headers: vec![("Authorization", "Basic user passwd")],
             body: None,
         };
@@ -596,7 +596,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://httpbin.org/basic-auth/admin/secret",
+            url: "https://httpbin.org/basic-auth/admin/secret".to_string(),
             headers: vec![("Authorization", "Basic {{user}} {{pass}}")],
             body: None,
         };
@@ -624,7 +624,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "POST",
-            url: "https://api.example.com/users",
+            url: "https://api.example.com/users".to_string(),
             headers: vec![
                 ("Content-Type", "application/json"),
                 ("Authorization", "Bearer secret-token"),
@@ -656,7 +656,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://api.example.com/ping",
+            url: "https://api.example.com/ping".to_string(),
             headers: vec![("Accept", "application/json")],
             body: None,
         };
@@ -683,7 +683,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://httpbin.org/basic-auth/user/passwd",
+            url: "https://httpbin.org/basic-auth/user/passwd".to_string(),
             // Colon-separated credentials (the form many users write).
             headers: vec![("Authorization", "Basic user:passwd")],
             body: None,
@@ -714,7 +714,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://api.example.com/tokens",
+            url: "https://api.example.com/tokens".to_string(),
             headers: vec![("Authorization", "Basic {{user}}:{{password}}")],
             body: None,
         };
@@ -742,7 +742,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://api.example.com/tokens",
+            url: "https://api.example.com/tokens".to_string(),
             // Already base64-encoded: must be left untouched.
             headers: vec![("Authorization", "Basic YWRtaW46c2VjcmV0")],
             body: None,
@@ -817,7 +817,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "POST",
-            url: "https://api.example.com/values",
+            url: "https://api.example.com/values".to_string(),
             headers: vec![("Content-Type", "application/json")],
             body: Some("# leading comment\n{\"a\":1}\n# trailing comment"),
         };
@@ -841,7 +841,7 @@ mod tests {
         let http_req = HttpRequest {
             name: None,
             method: "GET",
-            url: "https://api.example.com/values",
+            url: "https://api.example.com/values".to_string(),
             headers: vec![("Authorization", "Bearer token")],
             // Matches the reported case: a stray comment captured as the body.
             body: Some("# some comment here"),
